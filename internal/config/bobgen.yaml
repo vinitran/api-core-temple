@@ -1,0 +1,5 @@
+psql:
+  dsn: "postgres://postgres:123456@localhost:5433/postgres?sslmode=disable"
+  output: "./internal/content/bob"
+  uuid_pkg: "google"
+  no_factory: true
