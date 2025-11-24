@@ -5,6 +5,7 @@ import (
 	"os"
 	"otp-core/internal/config"
 	"otp-core/internal/content/container"
+	"otp-core/internal/migrate"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -21,6 +22,12 @@ var (
 		Name:     config.FlagAddress,
 		Value:    "0.0.0.0:3030",
 		Usage:    "Configuration Address",
+		Required: false,
+	}
+	configMigrateActionFlag = cli.StringFlag{
+		Name:     config.FlagMigrateAction,
+		Value:    config.FlagUpAction,
+		Usage:    "Migration action (up, down, redo, status, etc.)",
 		Required: false,
 	}
 )
@@ -55,6 +62,20 @@ func main() {
 			Usage:   "Run the api",
 			Action:  startAPIServer,
 			Flags:   append(flags, &configAddressFlag),
+		},
+		{
+			Name:  "migrate",
+			Usage: "Run database migrations (goose)",
+			Flags: []cli.Flag{
+				&configMigrateActionFlag,
+			},
+			Action: func(c *cli.Context) error {
+				action := c.String(config.FlagMigrateAction)
+				if action == "" {
+					action = config.FlagUpAction
+				}
+				return migrate.Run(c.Context, cfg.Database, action)
+			},
 		},
 	}
 

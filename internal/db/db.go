@@ -13,7 +13,7 @@ import (
 
 // NewSQLDB creates a new SQL DB
 func NewSQLDB(cfg DatabaseConfig) (*pgxpool.Pool, error) {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name)
+	dsn := cfg.DSN()
 	dsnSafe := fmt.Sprintf("postgres://%s:****@%s:%s/%s?sslmode=disable", cfg.User, cfg.Host, cfg.Port, cfg.Name)
 
 	log.Printf("postgres: initializing pool for %s", dsnSafe)

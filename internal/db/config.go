@@ -1,5 +1,7 @@
 package db
 
+import "fmt"
+
 // DatabaseConfig provide fields to configure the pool
 type DatabaseConfig struct {
 	// Database name
@@ -19,6 +21,11 @@ type DatabaseConfig struct {
 
 	// MaxConns is the maximum number of connections in the pool.
 	MaxConns int `mapstructure:"MaxConns"`
+}
+
+// DSN builds a postgres connection string.
+func (cfg DatabaseConfig) DSN() string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name)
 }
 
 // RedisConfig provide fields to configure the pool
