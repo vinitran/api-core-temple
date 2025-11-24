@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 	"otp-core/internal/config"
-	"otp-core/internal/content/container"
+	"otp-core/internal/container"
 	"otp-core/internal/migrate"
 	"strings"
 

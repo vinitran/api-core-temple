@@ -1,5 +1,30 @@
+plugins_preset: "none"
+plugins:
+  dbinfo:
+    disabled: true
+  enums:
+    disabled: true
+  factory:
+    disabled: true
+  dberrors:
+    disabled: true
+  models:
+    disabled: false
+    pkgname: "bobmodel"
+    destination: "internal/bob"
+  where:
+    disabled: true
+  loaders:
+    disabled: true
+  joins:
+    disabled: true
+
 psql:
-  dsn: "postgres://postgres:123456@localhost:5433/postgres?sslmode=disable"
-  output: "./internal/content/bob"
+  dsn: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
   uuid_pkg: "google"
   no_factory: true
+  no_factory_custom_interface: true
+  no_tests: true
+  no_integration_tests: true
+  skip_dbinfo: true
+  skip_dberrors: true

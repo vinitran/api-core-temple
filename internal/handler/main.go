@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	authservice "otp-core/internal/service/auth"
 	"otp-core/pkg/auth"
 	"otp-core/pkg/errorx"
 	httpx "otp-core/pkg/httpx_echo"
@@ -51,10 +52,10 @@ func New(cfg *Config) (http.Handler, error) {
 		})
 	}
 
-	//groupUser := &GroupUser{cfg}
-	//{
-	//	routesAPIv1.GET("/me", authorized(groupUser.ShowMe))
-	//}
+	authGroup := routesAPIv1.Group("/auth")
+	if err := registerAuthRoutes(authGroup, cfg.Container); err != nil {
+		return nil, err
+	}
 
 	return r, nil
 }
@@ -87,4 +88,14 @@ func queryParamInt(c echo.Context, name string, val int) int {
 	}
 
 	return i
+}
+
+func registerAuthRoutes(group *echo.Group, injector *do.Injector) error {
+	authHandler, err := do.Invoke[*authservice.Handler](injector)
+	if err != nil {
+		return err
+	}
+	group.GET("/google/login", authHandler.GoogleLogin)
+	group.GET("/google/callback", authHandler.GoogleCallback)
+	return nil
 }

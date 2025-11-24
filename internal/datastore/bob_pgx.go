@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/stephenafamo/bob"
 	"github.com/stephenafamo/scan"
 )
 
@@ -17,6 +18,15 @@ type BobExecutor interface {
 type BobExecutorPgx struct {
 	pool PGXPool
 }
+
+type BobExecutorTx struct {
+	tx pgx.Tx
+}
+
+var (
+	_ bob.Executor = (*BobExecutorPgx)(nil)
+	_ bob.Executor = (*BobExecutorTx)(nil)
+)
 
 type rows struct {
 	pgx.Rows
@@ -48,10 +58,36 @@ func (v *BobExecutorPgx) QueryContext(ctx context.Context, query string, args ..
 }
 
 func (v *BobExecutorPgx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	tag, err := v.pool.Exec(ctx, query, args)
+	tag, err := v.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 
 	return driver.RowsAffected(tag.RowsAffected()), err
+}
+
+func (v *BobExecutorTx) QueryContext(ctx context.Context, query string, args ...any) (scan.Rows, error) {
+	r, err := v.tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return rows{r}, nil
+}
+
+func (v *BobExecutorTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	tag, err := v.tx.Exec(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return driver.RowsAffected(tag.RowsAffected()), err
+}
+
+func NewBobExecutor(pool PGXPool) bob.Executor {
+	return &BobExecutorPgx{pool: pool}
+}
+
+func NewBobExecutorFromTx(tx pgx.Tx) bob.Executor {
+	return &BobExecutorTx{tx: tx}
 }
