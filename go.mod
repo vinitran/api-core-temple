@@ -16,6 +16,7 @@ require (
 	github.com/samber/do v1.6.0
 	github.com/segmentio/encoding v0.4.1
 	github.com/spf13/viper v1.19.0
+	github.com/stephenafamo/scan v0.4.2
 	github.com/urfave/cli/v2 v2.27.5
 	golang.org/x/crypto v0.31.0
 )
@@ -30,7 +31,6 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/gojek/heimdall/v7 v7.0.3 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -55,7 +55,6 @@ require (
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	github.com/stephenafamo/scan v0.4.2 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect

@@ -38,7 +38,7 @@ func startAPIServer(c *cli.Context) error {
 	go func() {
 		log.Printf("ListenAndServe: %s\n", c.String(config.FlagAddress))
 		err := srv.ListenAndServe()
-		if err != nil {
+		if err != nil && err != http.ErrServerClosed {
 			log.Printf("ListenAndServe failed: %s\n", err)
 			quit <- os.Kill
 		}

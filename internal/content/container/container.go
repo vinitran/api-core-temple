@@ -1,16 +1,17 @@
 package container
 
 import (
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
-	"github.com/samber/do"
 	"net/http"
 	"otp-core/internal/config"
 	"otp-core/internal/content/handler"
 	"otp-core/internal/db"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+	"github.com/samber/do"
 )
 
-func NewContainer(cfg *config.Config) *do.Injector {
+func NewContainer(cfg *config.Config) (*do.Injector, error) {
 	injector := do.New()
 
 	do.ProvideValue(injector, cfg)
@@ -24,7 +25,15 @@ func NewContainer(cfg *config.Config) *do.Injector {
 
 	do.Provide(injector, ProvideRouter)
 
-	return injector
+	if _, err := do.Invoke[*pgxpool.Pool](injector); err != nil {
+		return nil, err
+	}
+
+	if _, err := do.Invoke[*redis.Client](injector); err != nil {
+		return nil, err
+	}
+
+	return injector, nil
 }
 
 func ProvideRouter(i *do.Injector) (http.Handler, error) {

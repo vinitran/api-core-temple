@@ -23,12 +23,6 @@ var (
 		Usage:    "Configuration Address",
 		Required: false,
 	}
-	configMigrateActionFlag = cli.StringFlag{
-		Name:     config.FlagMigrateAction,
-		Value:    "up",
-		Usage:    "Configuration up or down in migration",
-		Required: true,
-	}
 )
 
 func init() {
@@ -39,11 +33,14 @@ func init() {
 }
 
 func main() {
-	cfg, err := config.Load(os.Getenv("CONFIG_PATH"))
+	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
-	ctn := container.NewContainer(cfg)
+	ctn, err := container.NewContainer(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	app := cli.NewApp()
 	app.Name = appName

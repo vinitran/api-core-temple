@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"otp-core/pkg/auth"
 	"otp-core/pkg/errorx"
-	"otp-core/pkg/httpx-echo"
+	httpx "otp-core/pkg/httpx_echo"
 	"strconv"
 
 	"github.com/labstack/echo/v4"

@@ -1,13 +1,10 @@
 package config
 
 import (
-	"bytes"
 	"log"
 	"otp-core/internal/db"
-	"path/filepath"
-	"strings"
+	"strconv"
 
-	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 )
 
@@ -24,61 +21,78 @@ type Config struct {
 	Redis    db.RedisConfig    `mapstructure:"Redis"`
 }
 
-// Default parses the default configuration values.
-func Default() (*Config, error) {
-	var cfg Config
-	viper.SetConfigType("toml")
+// Load loads the configuration from environment variables
+func Load() (*Config, error) {
+	cfg := &Config{}
 
-	err := viper.ReadConfig(bytes.NewBuffer([]byte(DefaultValues)))
-	if err != nil {
-		return nil, err
-	}
-	err = viper.Unmarshal(&cfg, viper.DecodeHook(mapstructure.TextUnmarshallerHookFunc()))
-	if err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
+	// Set up viper to read from environment variables
+	viper.AutomaticEnv()
+	viper.SetEnvPrefix("")
 
-// Load loads the configuration
-func Load(configFilePath string) (*Config, error) {
-	log.Println("config", configFilePath)
-	cfg, err := Default()
-	if err != nil {
-		return nil, err
-	}
-	if configFilePath != "" {
-		dirName, fileName := filepath.Split(configFilePath)
-		log.Println("config path: ", configFilePath)
+	// Set default values
+	setDefaults()
 
-		fileExtension := strings.TrimPrefix(filepath.Ext(fileName), ".")
-		fileNameWithoutExtension := strings.TrimSuffix(fileName, "."+fileExtension)
-
-		viper.AddConfigPath(dirName)
-		viper.SetConfigName(fileNameWithoutExtension)
-		viper.SetConfigType(fileExtension)
+	// Load Database config
+	cfg.Database = db.DatabaseConfig{
+		Host:     getEnvString("DATABASE_HOST", "postgres"),
+		Port:     getEnvString("DATABASE_PORT", "5432"),
+		User:     getEnvString("DATABASE_USER", "postgres"),
+		Password: getEnvString("DATABASE_PASSWORD", ""),
+		Name:     getEnvString("DATABASE_NAME", "postgres"),
+		MaxConns: getEnvInt("DATABASE_MAX_CONNS", 0),
 	}
 
-	err = viper.ReadInConfig()
-	if err != nil {
-		_, ok := err.(viper.ConfigFileNotFoundError)
-		if ok {
-			log.Println("config file not found")
-		} else {
-			log.Println("error reading config file: ", err)
-			return nil, err
-		}
+	// Load Redis config
+	cfg.Redis = db.RedisConfig{
+		Host:     getEnvString("REDIS_HOST", "redis"),
+		Port:     getEnvString("REDIS_PORT", "6379"),
+		Password: getEnvString("REDIS_PASSWORD", ""),
+		Name:     getEnvString("REDIS_NAME", "redis"),
 	}
 
-	decodeHooks := []viper.DecoderConfigOption{
-		// this allows arrays to be decoded from env var separated by ",", example: MY_VAR="value1,value2,value3"
-		viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(mapstructure.TextUnmarshallerHookFunc(), mapstructure.StringToSliceHookFunc(","))),
-	}
-
-	err = viper.Unmarshal(&cfg, decodeHooks...)
-	if err != nil {
-		return nil, err
-	}
+	log.Println("Configuration loaded from environment variables")
+	log.Printf("Database: %s@%s:%s/%s", cfg.Database.User, cfg.Database.Host, cfg.Database.Port, cfg.Database.Name)
+	log.Printf("Redis: %s:%s", cfg.Redis.Host, cfg.Redis.Port)
 
 	return cfg, nil
+}
+
+// setDefaults sets default values for viper
+func setDefaults() {
+	// Database defaults
+	viper.SetDefault("DATABASE_HOST", "postgres")
+	viper.SetDefault("DATABASE_PORT", "5432")
+	viper.SetDefault("DATABASE_USER", "postgres")
+	viper.SetDefault("DATABASE_PASSWORD", "")
+	viper.SetDefault("DATABASE_NAME", "postgres")
+	viper.SetDefault("DATABASE_MAX_CONNS", 0)
+
+	// Redis defaults
+	viper.SetDefault("REDIS_HOST", "redis")
+	viper.SetDefault("REDIS_PORT", "6379")
+	viper.SetDefault("REDIS_PASSWORD", "")
+	viper.SetDefault("REDIS_NAME", "redis")
+}
+
+// getEnvString gets environment variable as string with fallback
+func getEnvString(key, defaultValue string) string {
+	value := viper.GetString(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
+// getEnvInt gets environment variable as int with fallback
+func getEnvInt(key string, defaultValue int) int {
+	value := viper.GetString(key)
+	if value == "" {
+		return defaultValue
+	}
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("Warning: invalid integer value for %s: %s, using default: %d", key, value, defaultValue)
+		return defaultValue
+	}
+	return intValue
 }

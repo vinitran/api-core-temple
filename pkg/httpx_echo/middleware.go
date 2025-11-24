@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/golang-jwt/jwt/v4"
-	"github.com/labstack/echo/v4"
 	"net/http"
 	"net/url"
 	"otp-core/pkg/auth"
@@ -13,6 +11,9 @@ import (
 	"otp-core/pkg/jwtx"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/labstack/echo/v4"
 )
 
 type Guard interface {
