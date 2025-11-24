@@ -74,7 +74,7 @@ func main() {
 				if action == "" {
 					action = config.FlagUpAction
 				}
-				return migrate.Run(c.Context, cfg.Database, action)
+				return migrate.Run(c.Context, cfg.Database, migrate.Command(action))
 			},
 		},
 	}

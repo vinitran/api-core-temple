@@ -14,8 +14,17 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
+type Command string
+
+const (
+	CommandUp     Command = "up"
+	CommandDown   Command = "down"
+	CommandRedo   Command = "redo"
+	CommandStatus Command = "status"
+)
+
 // Run executes goose migrations using the embedded SQL files.
-func Run(ctx context.Context, cfg db.DatabaseConfig, command string) error {
+func Run(ctx context.Context, cfg db.DatabaseConfig, command Command) error {
 	dsn := cfg.DSN()
 	log.Printf("migrate: start command=%s dsn=%s", command, dsn)
 
@@ -39,16 +48,16 @@ func Run(ctx context.Context, cfg db.DatabaseConfig, command string) error {
 
 	var runErr error
 	switch command {
-	case "up":
+	case CommandUp:
 		runErr = goose.UpContext(ctx, sqlDB, migrationsDir)
-	case "down":
+	case CommandDown:
 		runErr = goose.DownContext(ctx, sqlDB, migrationsDir)
-	case "status":
+	case CommandStatus:
 		runErr = goose.StatusContext(ctx, sqlDB, migrationsDir)
-	case "redo":
+	case CommandRedo:
 		runErr = goose.RedoContext(ctx, sqlDB, migrationsDir)
 	default:
-		runErr = goose.RunContext(ctx, command, sqlDB, migrationsDir)
+		runErr = goose.RunContext(ctx, string(command), sqlDB, migrationsDir)
 	}
 
 	if runErr != nil {
