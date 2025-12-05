@@ -1,11 +1,11 @@
 package main
 
 import (
+	"api-core/internal/config"
+	"api-core/internal/container"
+	"api-core/internal/migrate"
 	"log"
 	"os"
-	"otp-core/internal/config"
-	"otp-core/internal/container"
-	"otp-core/internal/migrate"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	appName = "backend-wallet"
+	appName = "api-core"
 	envPath = ".env"
 )
 

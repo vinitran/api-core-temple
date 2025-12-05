@@ -1,14 +1,16 @@
 package container
 
 import (
+	"api-core/internal/config"
+	"api-core/internal/datastore"
+	"api-core/internal/datastore/userstore"
+	"api-core/internal/db"
+	"api-core/internal/handler"
+	authhandler "api-core/internal/handler/auth"
+	authservice "api-core/internal/service/auth"
+	appauth "api-core/pkg/auth"
+	"api-core/pkg/jwtx"
 	"net/http"
-	"otp-core/internal/config"
-	"otp-core/internal/datastore/userstore"
-	"otp-core/internal/db"
-	"otp-core/internal/handler"
-	authservice "otp-core/internal/service/auth"
-	appauth "otp-core/pkg/auth"
-	"otp-core/pkg/jwtx"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -25,6 +27,14 @@ func NewContainer(cfg *config.Config) (*do.Injector, error) {
 	})
 	do.Provide(injector, func(i *do.Injector) (*redis.Client, error) {
 		return db.NewRedis(cfg.Redis)
+	})
+
+	do.Provide(injector, func(i *do.Injector) (datastore.TxRunner, error) {
+		pool, err := do.Invoke[*pgxpool.Pool](i)
+		if err != nil {
+			return nil, err
+		}
+		return datastore.NewTxRunner(pool), nil
 	})
 
 	do.Provide(injector, func(i *do.Injector) (userstore.Store, error) {
@@ -59,9 +69,9 @@ func NewContainer(cfg *config.Config) (*do.Injector, error) {
 		return authservice.NewService(repo, googleOAuth, tokenIssuer, redisClient, cfg.Google), nil
 	})
 
-	do.Provide(injector, func(i *do.Injector) (*authservice.Handler, error) {
+	do.Provide(injector, func(i *do.Injector) (*authhandler.Handler, error) {
 		service := do.MustInvoke[*authservice.Service](i)
-		return authservice.NewHandler(service), nil
+		return authhandler.NewHandler(service), nil
 	})
 
 	do.Provide(injector, ProvideRouter)

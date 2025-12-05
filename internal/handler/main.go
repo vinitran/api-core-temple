@@ -1,12 +1,8 @@
 package handler
 
 import (
-	"errors"
+	authhandler "api-core/internal/handler/auth"
 	"net/http"
-	authservice "otp-core/internal/service/auth"
-	"otp-core/pkg/auth"
-	"otp-core/pkg/errorx"
-	httpx "otp-core/pkg/httpx_echo"
 	"strconv"
 
 	"github.com/labstack/echo/v4"
@@ -60,22 +56,6 @@ func New(cfg *Config) (http.Handler, error) {
 	return r, nil
 }
 
-func restAbort(c echo.Context, v any, err error) error {
-	if errors.Is(err, auth.ErrInvalidSession) {
-		return httpx.Abort(c, errorx.Wrap(err, errorx.Authn))
-	}
-
-	if _, ok := err.(*errorx.Error); ok {
-		return httpx.Abort(c, err)
-	}
-
-	if err != nil {
-		return httpx.Abort(c, errorx.Wrap(err, errorx.Service))
-	}
-
-	return httpx.Abort(c, v)
-}
-
 func queryParamInt(c echo.Context, name string, val int) int {
 	v := c.QueryParam(name)
 	if v == "" {
@@ -91,7 +71,7 @@ func queryParamInt(c echo.Context, name string, val int) int {
 }
 
 func registerAuthRoutes(group *echo.Group, injector *do.Injector) error {
-	authHandler, err := do.Invoke[*authservice.Handler](injector)
+	authHandler, err := do.Invoke[*authhandler.Handler](injector)
 	if err != nil {
 		return err
 	}

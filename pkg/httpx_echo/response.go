@@ -1,10 +1,11 @@
 package httpx
 
 import (
+	"api-core/pkg/auth"
+	"api-core/pkg/errorx"
 	"errors"
 	"fmt"
 	"net/http"
-	"otp-core/pkg/errorx"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -81,4 +82,28 @@ func ValidateStruct(c echo.Context, v ValidatorStruct, s any) error {
 	}
 
 	return fmt.Errorf("invalid %s", strings.Join(fields, ", "))
+}
+
+// RestAbort handles HTTP response with proper error handling.
+// It returns a success response if err is nil, otherwise it wraps and returns the error.
+// The function prioritizes specific error types (auth errors, errorx.Error) before generic errors.
+func RestAbort(c echo.Context, v any, err error) error {
+	// Success case: no error, return data
+	if err == nil {
+		return Abort(c, v)
+	}
+
+	// Handle specific authentication errors
+	if errors.Is(err, auth.ErrInvalidSession) {
+		return Abort(c, errorx.Wrap(err, errorx.Authn))
+	}
+
+	// Handle already wrapped errorx.Error (preserve the error kind)
+	var targetErr *errorx.Error
+	if errors.As(err, &targetErr) {
+		return Abort(c, err)
+	}
+
+	// Generic error: wrap as Service error
+	return Abort(c, errorx.Wrap(err, errorx.Service))
 }

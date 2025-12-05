@@ -3,7 +3,7 @@ version: '3.8'
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: resell-ticket-postgres
+    container_name: api-core-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -18,11 +18,11 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - resell-ticket-network
+      - api-core-network
 
   redis:
     image: redis:7-alpine
-    container_name: resell-ticket-redis
+    container_name: api-core-redis
     ports:
       - "6379:6379"
     volumes:
@@ -34,13 +34,13 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - resell-ticket-network
+      - api-core-network
 
 volumes:
   postgres_data:
   redis_data:
 
 networks:
-  resell-ticket-network:
+  api-core-network:
     driver: bridge
 

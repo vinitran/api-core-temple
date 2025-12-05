@@ -1,13 +1,13 @@
 package main
 
 import (
+	"api-core/internal/config"
 	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"otp-core/internal/config"
 	"time"
 
 	"github.com/samber/do"

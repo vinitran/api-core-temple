@@ -1,14 +1,14 @@
 package httpx
 
 import (
+	"api-core/pkg/auth"
+	"api-core/pkg/errorx"
+	"api-core/pkg/jwtx"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"otp-core/pkg/auth"
-	"otp-core/pkg/errorx"
-	"otp-core/pkg/jwtx"
 	"strings"
 	"time"
 
