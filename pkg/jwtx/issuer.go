@@ -19,7 +19,7 @@ func NewHMACIssuer(secret string, issuer string, expiration time.Duration) (*HMA
 		return nil, errors.New("jwt issuer: empty secret")
 	}
 	if issuer == "" {
-		issuer = "otp-core"
+		issuer = "api-core"
 	}
 	if expiration <= 0 {
 		expiration = time.Hour

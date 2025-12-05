@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	bobmodel "otp-core/internal/bob"
-	"otp-core/internal/datastore"
+	bobmodel "api-core/internal/bob"
+	"api-core/internal/datastore"
 
 	"github.com/aarondl/opt/omit"
 	"github.com/aarondl/opt/omitnull"

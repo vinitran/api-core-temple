@@ -1,8 +1,8 @@
 package config
 
 import (
+	"api-core/internal/db"
 	"log"
-	"otp-core/internal/db"
 	"strconv"
 	"strings"
 	"time"
@@ -73,7 +73,7 @@ func Load() (*Config, error) {
 	jwtExpMinutes := getEnvInt("AUTH_JWT_EXP_MINUTES", 60)
 	cfg.Auth = AuthConfig{
 		JWTSecret:     getEnvString("AUTH_JWT_SECRET", defaultJWTSecret),
-		JWTIssuer:     getEnvString("AUTH_JWT_ISSUER", "otp-core"),
+		JWTIssuer:     getEnvString("AUTH_JWT_ISSUER", "api-core"),
 		JWTExpiration: time.Duration(jwtExpMinutes) * time.Minute,
 	}
 	if cfg.Auth.JWTSecret == defaultJWTSecret {
@@ -112,7 +112,7 @@ func setDefaults() {
 	viper.SetDefault("REDIS_NAME", "redis")
 
 	// Auth defaults
-	viper.SetDefault("AUTH_JWT_ISSUER", "otp-core")
+	viper.SetDefault("AUTH_JWT_ISSUER", "api-core")
 	viper.SetDefault("AUTH_JWT_SECRET", defaultJWTSecret)
 	viper.SetDefault("AUTH_JWT_EXP_MINUTES", 60)
 

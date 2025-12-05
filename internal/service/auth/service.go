@@ -7,10 +7,10 @@ import (
 	"log"
 	"time"
 
-	"otp-core/internal/config"
-	"otp-core/internal/datastore/userstore"
-	appauth "otp-core/pkg/auth"
-	"otp-core/pkg/jwtx"
+	"api-core/internal/config"
+	"api-core/internal/datastore/userstore"
+	appauth "api-core/pkg/auth"
+	"api-core/pkg/jwtx"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"

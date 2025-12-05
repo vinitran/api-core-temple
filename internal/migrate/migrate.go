@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"otp-core/internal/db"
+	"api-core/internal/db"
 
 	// register pgx driver for database/sql
 	_ "github.com/jackc/pgx/v5/stdlib"
