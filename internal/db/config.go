@@ -1,44 +1,63 @@
 package db
 
-import "fmt"
+import (
+	"net"
+	"net/url"
+	"strconv"
+)
 
-// DatabaseConfig provide fields to configure the pool
+// DatabaseConfig provides the fields to configure the Postgres pool.
 type DatabaseConfig struct {
-	// Database name
-	Name string `mapstructure:"Name"`
-
-	// Database User name
-	User string `mapstructure:"User"`
-
-	// Database Password of the user
-	Password string `mapstructure:"Password"`
-
-	// Host address of database
-	Host string `mapstructure:"Host"`
-
-	// Port Number of database
-	Port string `mapstructure:"Port"`
-
-	// MaxConns is the maximum number of connections in the pool.
-	MaxConns int `mapstructure:"MaxConns"`
+	Host     string
+	Port     string
+	User     string
+	Password string
+	Name     string
+	// SSLMode is the libpq sslmode (disable, require, verify-full, ...).
+	SSLMode string
+	// MaxConns is the maximum number of connections in the pool; 0 means auto.
+	MaxConns int
 }
 
-// DSN builds a postgres connection string.
+// DSN builds a postgres connection URL. Credentials are URL-escaped, so
+// passwords may contain any character.
 func (cfg DatabaseConfig) DSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name)
+	return cfg.url().String()
 }
 
-// RedisConfig provide fields to configure the pool
+// RedactedDSN is DSN with the password masked, safe for logs.
+func (cfg DatabaseConfig) RedactedDSN() string {
+	return cfg.url().Redacted()
+}
+
+func (cfg DatabaseConfig) url() *url.URL {
+	sslMode := cfg.SSLMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+
+	return &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(cfg.User, cfg.Password),
+		Host:     net.JoinHostPort(cfg.Host, cfg.Port),
+		Path:     "/" + cfg.Name,
+		RawQuery: url.Values{"sslmode": {sslMode}}.Encode(),
+	}
+}
+
+// RedisConfig provides the fields to configure the Redis client.
 type RedisConfig struct {
-	// Database name
-	Name string `mapstructure:"Name"`
+	Host     string
+	Port     string
+	Password string
+	DB       int
+}
 
-	// Database Password of the user
-	Password string `mapstructure:"Password"`
+// Addr returns host:port.
+func (cfg RedisConfig) Addr() string {
+	return net.JoinHostPort(cfg.Host, cfg.Port)
+}
 
-	// Host address of database
-	Host string `mapstructure:"Host"`
-
-	// Port Number of database
-	Port string `mapstructure:"Port"`
+func (cfg RedisConfig) String() string {
+	return cfg.Addr() + "/" + strconv.Itoa(cfg.DB)
 }

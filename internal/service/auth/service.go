@@ -1,130 +1,152 @@
+// Package auth implements sign-in with an external identity provider and
+// issues the application's own access tokens.
 package auth
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log"
+	"strconv"
+	"strings"
 	"time"
 
-	"api-core/internal/config"
-	"api-core/internal/datastore/userstore"
-	appauth "api-core/pkg/auth"
-	"api-core/pkg/jwtx"
-
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
-	"golang.org/x/oauth2"
+
+	"api-core/internal/domain"
+	"api-core/pkg/errorx"
 )
 
+const defaultStateTTL = 5 * time.Minute
+
+// ErrProviderDisabled is returned when no identity provider is configured.
+var ErrProviderDisabled = errorx.New(errorx.Unavailable, "google sign-in is not configured")
+
+// Deps are the collaborators of Service. Identity may be nil, in which case
+// sign-in endpoints answer 503 while the rest of the API keeps working.
+type Deps struct {
+	Users    UserStore
+	Identity IdentityProvider
+	States   StateStore
+	Tokens   TokenIssuer
+}
+
 type Service struct {
-	stateTTL    time.Duration
-	statePrefix string
+	users    UserStore
+	identity IdentityProvider
+	states   StateStore
+	tokens   TokenIssuer
 
-	userStore   userstore.Store
-	googleOAuth *appauth.GoogleOAuth
-	tokenIssuer *jwtx.HMACIssuer
-	redis       *redis.Client
-	cfg         config.GoogleConfig
+	stateTTL time.Duration
+	now      func() time.Time
+	newState func() string
 }
 
-type AuthResponse struct {
-	Token string          `json:"token"`
-	User  *userstore.User `json:"user"`
+// AuthResult is returned after a successful sign-in.
+type AuthResult struct {
+	AccessToken string
+	ExpiresAt   time.Time
+	User        *domain.User
 }
 
-func NewService(
-	userStore userstore.Store,
-	googleOAuth *appauth.GoogleOAuth,
-	tokenIssuer *jwtx.HMACIssuer,
-	redis *redis.Client,
-	googleCfg config.GoogleConfig,
-) *Service {
+func NewService(deps Deps) (*Service, error) {
+	if deps.Users == nil || deps.States == nil || deps.Tokens == nil {
+		return nil, errors.New("auth service: users, states and tokens are required")
+	}
+
 	return &Service{
-		stateTTL:    5 * time.Minute,
-		statePrefix: "oauth_state:",
-		userStore:   userStore,
-		googleOAuth: googleOAuth,
-		tokenIssuer: tokenIssuer,
-		redis:       redis,
-		cfg:         googleCfg,
-	}
-}
-
-func (s *Service) stateKey(state string) string {
-	return s.statePrefix + state
-}
-
-func (s *Service) GenerateLoginURL(ctx context.Context) (string, error) {
-	if s.googleOAuth == nil {
-		return "", errors.New("google oauth not configured")
-	}
-
-	state := uuid.NewString()
-	if err := s.redis.Set(ctx, s.stateKey(state), "1", s.stateTTL).Err(); err != nil {
-		return "", fmt.Errorf("store oauth state: %w", err)
-	}
-	url := s.googleOAuth.AuthCodeURL(state, oauth2.SetAuthURLParam("response_type", "code"))
-	log.Printf("auth: generated google login url: %s", url)
-	return url, nil
-}
-
-func (s *Service) HandleCallback(ctx context.Context, state, code string) (*AuthResponse, error) {
-	if state == "" || code == "" {
-		return nil, errors.New("missing state or code")
-	}
-
-	ok, err := s.consumeState(ctx, state)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, errors.New("invalid state")
-	}
-
-	token, err := s.googleOAuth.Exchange(ctx, code)
-	if err != nil {
-		return nil, fmt.Errorf("google exchange: %w", err)
-	}
-
-	profile, err := s.googleOAuth.FetchUserInfo(ctx, token)
-	if err != nil {
-		return nil, fmt.Errorf("google userinfo: %w", err)
-	}
-
-	loginAt := time.Now().UTC()
-	user, err := s.userStore.UpsertGoogleUser(ctx, userstore.UpsertGoogleUserParams{
-		GoogleID:      profile.ID,
-		Email:         profile.Email,
-		Name:          &profile.Name,
-		Picture:       &profile.Picture,
-		Locale:        &profile.Locale,
-		VerifiedEmail: profile.VerifiedEmail,
-		LoginAt:       loginAt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("upsert user: %w", err)
-	}
-
-	tokenStr, err := s.tokenIssuer.Issue(fmt.Sprintf("%d", user.ID), user.Email)
-	if err != nil {
-		return nil, fmt.Errorf("issue token: %w", err)
-	}
-
-	return &AuthResponse{
-		Token: tokenStr,
-		User:  user,
+		users:    deps.Users,
+		identity: deps.Identity,
+		states:   deps.States,
+		tokens:   deps.Tokens,
+		stateTTL: defaultStateTTL,
+		now:      func() time.Time { return time.Now().UTC() },
+		newState: uuid.NewString,
 	}, nil
 }
 
-func (s *Service) consumeState(ctx context.Context, state string) (bool, error) {
-	key := s.stateKey(state)
-	val, err := s.redis.GetDel(ctx, key).Result()
-	if errors.Is(err, redis.Nil) {
-		return false, nil
+// GenerateLoginURL creates a one-time state and returns the provider's
+// authorization URL.
+func (s *Service) GenerateLoginURL(ctx context.Context) (string, error) {
+	if s.identity == nil {
+		return "", ErrProviderDisabled
 	}
+
+	state := s.newState()
+	if err := s.states.Save(ctx, state, s.stateTTL); err != nil {
+		return "", errorx.Wrap(err, errorx.Service)
+	}
+
+	return s.identity.AuthCodeURL(state), nil
+}
+
+// HandleCallback validates the state, exchanges the code, upserts the user and
+// issues an access token.
+func (s *Service) HandleCallback(ctx context.Context, state, code string) (*AuthResult, error) {
+	if s.identity == nil {
+		return nil, ErrProviderDisabled
+	}
+	if state == "" || code == "" {
+		return nil, errorx.New(errorx.Invalid, "missing state or code")
+	}
+
+	ok, err := s.states.Consume(ctx, state)
 	if err != nil {
-		return false, fmt.Errorf("consume state: %w", err)
+		return nil, errorx.Wrap(err, errorx.Service)
 	}
-	return val != "", nil
+	if !ok {
+		return nil, errorx.New(errorx.Authn, "invalid or expired state")
+	}
+
+	identity, err := s.identity.Authenticate(ctx, code)
+	if err != nil {
+		return nil, errorx.WrapMsg(err, errorx.Authn, "google authentication failed")
+	}
+	if identity.Subject == "" || identity.Email == "" {
+		return nil, errorx.New(errorx.Authn, "google account has no id or email")
+	}
+	if !identity.EmailVerified {
+		return nil, errorx.New(errorx.Authz, "google email is not verified")
+	}
+
+	user, err := s.users.UpsertGoogleUser(ctx, domain.GoogleAccount{
+		GoogleID:      identity.Subject,
+		Email:         identity.Email,
+		Name:          nonEmpty(identity.Name),
+		Picture:       nonEmpty(identity.Picture),
+		Locale:        nonEmpty(identity.Locale),
+		VerifiedEmail: identity.EmailVerified,
+		LoginAt:       s.now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := s.tokens.Issue(strconv.FormatInt(user.ID, 10), user.Email)
+	if err != nil {
+		return nil, errorx.Wrap(err, errorx.Service)
+	}
+
+	return &AuthResult{
+		AccessToken: token.Value,
+		ExpiresAt:   token.ExpiresAt,
+		User:        user,
+	}, nil
+}
+
+// CurrentUser returns the user identified by a verified token subject.
+func (s *Service) CurrentUser(ctx context.Context, subject string) (*domain.User, error) {
+	id, err := strconv.ParseInt(subject, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, errorx.New(errorx.Authn, "invalid token subject")
+	}
+
+	return s.users.GetByID(ctx, id)
+}
+
+func nonEmpty(s string) *string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+
+	return &s
 }

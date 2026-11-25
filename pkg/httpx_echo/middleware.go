@@ -1,63 +1,68 @@
 package httpx
 
 import (
-	"api-core/pkg/auth"
-	"api-core/pkg/errorx"
-	"api-core/pkg/jwtx"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/labstack/echo/v4"
+
+	"api-core/pkg/auth"
+	"api-core/pkg/errorx"
+	"api-core/pkg/jwtx"
 )
 
-type Guard interface {
-	AuthenticateJWT(tokenStr string) (*jwt.Token, error)
+const (
+	captchaVerifyURL   = "https://www.google.com/recaptcha/api/siteverify"
+	captchaTimeout     = 10 * time.Second
+	captchaMaxBodySize = 1 << 20
+)
+
+// TokenVerifier verifies a bearer token and returns its claims.
+// jwtx.HMAC and auth.CognitoVerifier satisfy it.
+type TokenVerifier interface {
+	Verify(token string) (*jwtx.Claims, error)
 }
 
-func Authn(guard Guard) echo.MiddlewareFunc {
+// Authn rejects requests without a valid bearer token and stores the verified
+// claims in the request context (see auth.ResolveValidSubject).
+func Authn(verifier TokenVerifier) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			header := c.Request().Header.Get("Authorization")
-			if header == "" {
-				return Abort(c, errorx.Wrap(errors.New("missing access token"), errorx.Authn), -1)
+			token, ok := bearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+			if !ok {
+				return Fail(c, errorx.New(errorx.Authn, "missing or malformed bearer token"))
 			}
 
-			parts := strings.Split(header, "Bearer")
-			if len(parts) != 2 {
-				return Abort(c, errorx.Wrap(errors.New("invalid access token"), errorx.Authn), -1)
-			}
-
-			token := strings.TrimSpace(parts[1])
-			if len(token) == 0 {
-				return Abort(c, errorx.Wrap(errors.New("invalid access token"), errorx.Authn), -1)
-			}
-
-			claims, err := guard.AuthenticateJWT(token)
+			claims, err := verifier.Verify(token)
 			if err != nil {
-				// although it's a client error, we don't want to detailed information
-				//nolint:errcheck
-				return Abort(c, errorx.Wrap(err, errorx.Authn), -1)
+				return Fail(c, errorx.WrapMsg(err, errorx.Authn, "invalid access token"))
 			}
 
-			ctx := c.Request().Context()
-			ctx = auth.WithAuthJWT(ctx, claims.Raw)
-
-			jwtClaims, err := jwtx.NewJWTClaims(claims.Claims)
-			if err != nil {
-				return Abort(c, errorx.Wrap(fmt.Errorf("invalid access token: %v", err), errorx.Authn), -1)
-			}
-
-			ctx = auth.WithAuthClaims(ctx, jwtClaims)
+			ctx := auth.WithAuthJWT(c.Request().Context(), token)
+			ctx = auth.WithAuthClaims(ctx, claims)
 			c.SetRequest(c.Request().WithContext(ctx))
+
 			return next(c)
 		}
 	}
+}
+
+// bearerToken extracts the token from an "Authorization: Bearer <token>" header.
+func bearerToken(header string) (string, bool) {
+	scheme, token, found := strings.Cut(strings.TrimSpace(header), " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+
+	token = strings.TrimSpace(token)
+	return token, token != ""
 }
 
 type CaptchaPayload struct {
@@ -73,41 +78,65 @@ type CaptchaVerifyResponse struct {
 	ErrorCodes  []string  `json:"error-codes"`
 }
 
-func CaptchaValid(secret string, score float64, action string) echo.MiddlewareFunc {
+// CaptchaValid verifies a reCAPTCHA v3 token sent as {"captcha": "..."} in the
+// JSON body. The body is restored so the handler can still bind it.
+func CaptchaValid(secret string, minScore float64, action string) echo.MiddlewareFunc {
+	client := &http.Client{Timeout: captchaTimeout}
+
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			if secret == "" {
-				return Abort(c, errorx.Wrap(errors.New("missing captcha secret"), errorx.Service))
+				return Fail(c, errorx.New(errorx.Service, "missing captcha secret"))
 			}
+
+			req := c.Request()
+			raw, err := io.ReadAll(io.LimitReader(req.Body, captchaMaxBodySize))
+			if err != nil {
+				return Fail(c, errorx.WrapMsg(err, errorx.Invalid, "unable to read request body"))
+			}
+			req.Body = io.NopCloser(bytes.NewReader(raw))
 
 			var payload CaptchaPayload
-			if err := c.Bind(&payload); err != nil {
-				return Abort(c, errorx.Wrap(err, errorx.Invalid))
+			if err := json.Unmarshal(raw, &payload); err != nil || payload.Captcha == "" {
+				return Fail(c, errorx.New(errorx.Captcha, "missing captcha"))
 			}
 
-			resp, err := http.PostForm("https://www.google.com/recaptcha/api/siteverify", url.Values{
-				"secret":   {secret},
-				"response": {payload.Captcha},
-			})
+			body, err := verifyCaptcha(c, client, secret, payload.Captcha)
 			if err != nil {
-				return Abort(c, errorx.Wrap(err, errorx.Service))
-			}
-			defer resp.Body.Close()
-
-			var body CaptchaVerifyResponse
-			if err = json.NewDecoder(resp.Body).Decode(&body); err != nil {
-				return Abort(c, errorx.Wrap(err, errorx.Service))
+				return Fail(c, errorx.WrapMsg(err, errorx.Service, "captcha verification failed"))
 			}
 
-			if action != "" && body.Action != action {
-				return Abort(c, errorx.Wrap(errors.New("captcha failed"), errorx.Authz))
-			}
-
-			if !body.Success || body.Score < score {
-				return Abort(c, errorx.Wrap(errors.New("captcha failed"), errorx.Authz))
+			if !body.Success || body.Score < minScore || (action != "" && body.Action != action) {
+				return Fail(c, errorx.New(errorx.Captcha, "captcha failed"))
 			}
 
 			return next(c)
 		}
 	}
+}
+
+func verifyCaptcha(c echo.Context, client *http.Client, secret, token string) (*CaptchaVerifyResponse, error) {
+	form := url.Values{"secret": {secret}, "response": {token}}
+	req, err := http.NewRequestWithContext(c.Request().Context(), http.MethodPost, captchaVerifyURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("captcha verify: unexpected status %d", resp.StatusCode)
+	}
+
+	var body CaptchaVerifyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, errors.Join(errors.New("captcha verify: decode response"), err)
+	}
+
+	return &body, nil
 }

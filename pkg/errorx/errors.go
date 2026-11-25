@@ -1,3 +1,5 @@
+// Package errorx classifies application errors into kinds that map to
+// transport-level status codes and client-safe messages.
 package errorx
 
 import (
@@ -10,12 +12,8 @@ import (
 	"github.com/ory/ladon"
 )
 
+// Kind is the category of an application error.
 type Kind uint8
-
-func (k Kind) Error() string {
-	// TODO implement me
-	panic("implement me")
-}
 
 const (
 	Other Kind = iota
@@ -29,7 +27,12 @@ const (
 	Captcha
 	Database
 	Service
+	Unavailable
 )
+
+const pgUniqueViolation = "23505"
+
+const maskedMessage = "unable to process"
 
 func (k Kind) String() string {
 	switch k {
@@ -53,11 +56,14 @@ func (k Kind) String() string {
 		return "database-query"
 	case Service:
 		return "internal-service-failure"
+	case Unavailable:
+		return "service-unavailable"
 	}
 
 	return "unknown"
 }
 
+// HTTPStatus maps the kind to an HTTP status code.
 func (k Kind) HTTPStatus() int {
 	switch k {
 	case Invalid:
@@ -74,94 +80,141 @@ func (k Kind) HTTPStatus() int {
 		return http.StatusUnauthorized
 	case Authz:
 		return http.StatusForbidden
-	case Database:
-		return http.StatusInternalServerError
+	case Unavailable:
+		return http.StatusServiceUnavailable
 	}
 
 	return http.StatusInternalServerError
 }
 
+// Error is an application error carrying a kind, a client-safe message and
+// the underlying cause.
 type Error struct {
 	err     error
 	kind    Kind
 	message string
 }
 
+// Error returns the message together with the cause, intended for logs.
 func (e *Error) Error() string {
-	return e.message
+	if e.err == nil || e.err.Error() == e.message {
+		return e.message
+	}
+
+	return e.message + ": " + e.err.Error()
 }
 
-// Unwrap offers the ability to check the cause using errors.Is
+// Unwrap offers the ability to check the cause using errors.Is / errors.As.
 func (e *Error) Unwrap() error {
 	return e.err
 }
 
+// Of reports whether the error is of kind k.
 func (e *Error) Of(k Kind) bool {
 	return e.kind == k
 }
 
+// Kind returns the error kind.
+func (e *Error) Kind() Kind {
+	return e.kind
+}
+
+// Message returns the message without the underlying cause.
+func (e *Error) Message() string {
+	return e.message
+}
+
+// Code returns the machine-readable error code.
 func (e *Error) Code() string {
 	return e.kind.String()
 }
 
+// Status returns the HTTP status code.
 func (e *Error) Status() int {
 	return e.kind.HTTPStatus()
 }
 
-func Wrap(err error, kind Kind) *Error {
-	if IsNoRows(err) {
-		return &Error{err: err, kind: NotExist, message: "not found"}
+// New creates an error of the given kind without an underlying cause.
+func New(kind Kind, message string) *Error {
+	return &Error{kind: kind, message: message}
+}
+
+// Wrap classifies err. Errors that are already *Error keep their kind;
+// well-known database / authorization errors are mapped to their natural kind;
+// everything else gets the given kind. Wrap(nil, ...) returns nil.
+func Wrap(err error, kind Kind) error {
+	if err == nil {
+		return nil
 	}
 
-	if IsForbidden(err) {
-		return &Error{err: err, kind: Authz, message: "unauthorized"}
+	var target *Error
+	if errors.As(err, &target) {
+		return err
 	}
 
-	if v, ok := IsDuplicated(err); ok {
-		return &Error{err: err, kind: Exist, message: v.Detail}
-	}
-
-	if _, ok := err.(*pgconn.PgError); ok {
+	switch {
+	case IsNoRows(err):
+		return &Error{err: err, kind: NotExist, message: "resource not found"}
+	case IsForbidden(err):
+		return &Error{err: err, kind: Authz, message: "forbidden"}
+	case IsDuplicated(err):
+		return &Error{err: err, kind: Exist, message: "resource already exists"}
+	case isPgError(err):
 		return &Error{err: err, kind: Database, message: err.Error()}
 	}
 
 	return &Error{err: err, kind: kind, message: err.Error()}
 }
 
-func IsNoRows(err error) bool {
-	if err == sql.ErrNoRows || err == pgx.ErrNoRows {
-		return true
+// WrapMsg wraps err with an explicit kind and client-safe message.
+// WrapMsg(nil, ...) returns nil.
+func WrapMsg(err error, kind Kind, message string) error {
+	if err == nil {
+		return nil
 	}
 
-	return false
+	return &Error{err: err, kind: kind, message: message}
+}
+
+// KindOf returns the kind of err, or Other when err is not an *Error.
+func KindOf(err error) Kind {
+	var target *Error
+	if errors.As(err, &target) {
+		return target.kind
+	}
+
+	return Other
+}
+
+func IsNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows)
 }
 
 func IsForbidden(err error) bool {
 	return errors.Is(err, ladon.ErrRequestDenied) || errors.Is(err, ladon.ErrRequestForcefullyDenied)
 }
 
-func IsDuplicated(err error) (*pgconn.PgError, bool) {
-	if err == nil {
-		return nil, false
-	}
-
-	if v, ok := err.(*pgconn.PgError); ok {
-		return v, v.SQLState() == "23505"
-	}
-
-	return nil, false
+func IsDuplicated(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }
 
+func isPgError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr)
+}
+
+// MaskErrorMessage returns a message that is safe to show to clients.
+// Server-side failures (5xx) never leak their details.
 func MaskErrorMessage(err error) string {
 	var target *Error
-
 	if !errors.As(err, &target) {
 		return "unexpected error occurred"
 	}
 
-	if target.Of(Database) || target.Of(Service) {
-		return "unable to process"
+	if target.Status() >= http.StatusInternalServerError && !target.Of(Unavailable) {
+		return maskedMessage
 	}
 
-	return target.Error()
+	return target.message
 }

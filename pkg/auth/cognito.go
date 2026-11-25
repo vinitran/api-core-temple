@@ -1,56 +1,93 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/golang-jwt/jwt/v4"
-	"io"
 	"net/http"
+	"time"
+
+	"github.com/golang-jwt/jwt/v4"
+
+	"api-core/pkg/jwtx"
 )
 
-type CognitoJWKs struct {
-	Keys []CognitoKeys `json:"keys"`
+const jwksFetchTimeout = 10 * time.Second
+
+// CognitoVerifier verifies AWS Cognito RS256 tokens. It satisfies the same
+// verifier contract as jwtx.HMAC, so the two are interchangeable in the
+// authentication middleware.
+type CognitoVerifier struct {
+	issuer string
+	jwks   JWKS
 }
 
-type CognitoKeys struct {
-	Alg string `json:"alg"`
-	E   string `json:"e"`
-	Kid string `json:"kid"`
-	Kty string `json:"kty"`
-	N   string `json:"n"`
-	Use string `json:"use"`
+type cognitoClaims struct {
+	jwtx.Claims
+	TokenUse string `json:"token_use"`
 }
 
-type AuthnCognito struct {
-	UserPoolId  string
-	Region      string
-	CognitoJWKs CognitoJWKs
-}
+// NewCognitoVerifier fetches the user pool's JWKS once and returns a verifier.
+func NewCognitoVerifier(ctx context.Context, region, userPoolID string) (*CognitoVerifier, error) {
+	issuer := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", region, userPoolID)
 
-func NewAuthnCognito(userPoolID, region string) (*AuthnCognito, error) {
-	var cognitoJWKs CognitoJWKs
+	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	defer cancel()
 
-	// Fetch the Cognito JWKs once at the start
-	cognitoURL := fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s/.well-known/jwks.json", region, userPoolID)
-	resp, err := http.Get(cognitoURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, issuer+"/.well-known/jwks.json", nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Cognito JWKs: %s", err)
+		return nil, fmt.Errorf("cognito: build jwks request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cognito: fetch jwks: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body Cognito JWKs: %s", err)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("cognito: fetch jwks: unexpected status %d", resp.StatusCode)
 	}
 
-	err = json.Unmarshal(body, &cognitoJWKs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse JWKs: %s", err)
+	var jwks JWKS
+	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		return nil, fmt.Errorf("cognito: decode jwks: %w", err)
 	}
 
-	return &AuthnCognito{userPoolID, region, cognitoJWKs}, nil
+	return &CognitoVerifier{issuer: issuer, jwks: jwks}, nil
 }
 
-func (authn *AuthnCognito) AuthenticateJWT(tokenStr string) (*jwt.Token, error) {
-	return VerifyToken(authn.CognitoJWKs, tokenStr, authn.Region, authn.UserPoolId)
+// Verify checks signature, expiry, issuer and token_use and returns the claims.
+func (v *CognitoVerifier) Verify(tokenStr string) (*jwtx.Claims, error) {
+	claims := &cognitoClaims{}
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}))
+
+	token, err := parser.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (any, error) {
+		kid, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, errors.New("token does not contain kid")
+		}
+
+		key, ok := v.jwks.Find(kid)
+		if !ok {
+			return nil, errors.New("matching jwk not found")
+		}
+
+		return key.RSAPublicKey()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", jwtx.ErrInvalidToken, err)
+	}
+	if !token.Valid {
+		return nil, jwtx.ErrInvalidToken
+	}
+	if !claims.VerifyIssuer(v.issuer, true) {
+		return nil, fmt.Errorf("%w: unexpected issuer", jwtx.ErrInvalidToken)
+	}
+	if claims.TokenUse != "id" && claims.TokenUse != "access" {
+		return nil, fmt.Errorf("%w: token_use should be id or access", jwtx.ErrInvalidToken)
+	}
+
+	return &claims.Claims, nil
 }

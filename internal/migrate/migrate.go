@@ -1,70 +1,129 @@
+// Package migrate applies the embedded SQL migrations with goose.
 package migrate
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"log"
+	"io/fs"
+	"log/slog"
 	"time"
-
-	"api-core/internal/db"
 
 	// register pgx driver for database/sql
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/lock"
+
+	"api-core/internal/db"
 )
+
+const tableName = "schema_migrations"
 
 type Command string
 
 const (
-	CommandUp     Command = "up"
-	CommandDown   Command = "down"
-	CommandRedo   Command = "redo"
-	CommandStatus Command = "status"
+	CommandUp      Command = "up"
+	CommandDown    Command = "down"
+	CommandRedo    Command = "redo"
+	CommandStatus  Command = "status"
+	CommandVersion Command = "version"
 )
 
-// Run executes goose migrations using the embedded SQL files.
-func Run(ctx context.Context, cfg db.DatabaseConfig, command Command) error {
-	dsn := cfg.DSN()
-	log.Printf("migrate: start command=%s dsn=%s", command, dsn)
+// Run executes a migration command against the embedded SQL files.
+//
+// A Postgres advisory lock is held for the duration of the command, so several
+// API instances starting at the same time apply migrations exactly once.
+func Run(ctx context.Context, cfg db.DatabaseConfig, command Command) (err error) {
+	logger := slog.With("component", "migrate", "command", command)
+	logger.Info("migrate: start", "dsn", cfg.RedactedDSN())
 
-	sqlDB, err := sql.Open("pgx", dsn)
+	sqlDB, err := sql.Open("pgx", cfg.DSN())
 	if err != nil {
-		return fmt.Errorf("open database for migrations: %w", err)
+		return fmt.Errorf("migrate: open database: %w", err)
 	}
-	defer sqlDB.Close()
-
+	defer func() {
+		err = errors.Join(err, sqlDB.Close())
+	}()
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-	sqlDB.SetMaxIdleConns(2)
-	sqlDB.SetMaxOpenConns(10)
+	sqlDB.SetMaxOpenConns(4)
 
-	// Ensure migrations use embedded filesystem.
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("set goose dialect: %w", err)
+	provider, err := newProvider(sqlDB)
+	if err != nil {
+		return err
 	}
-	goose.SetTableName("schema_migrations")
-	goose.SetLogger(log.New(log.Writer(), "goose: ", log.LstdFlags))
-	goose.SetBaseFS(migrationsFS)
 
-	var runErr error
+	if err := run(ctx, provider, command, logger); err != nil {
+		logger.Error("migrate: failed", "error", err)
+		return fmt.Errorf("migrate %s: %w", command, err)
+	}
+
+	logger.Info("migrate: finished")
+	return nil
+}
+
+func newProvider(sqlDB *sql.DB) (*goose.Provider, error) {
+	migrations, err := fs.Sub(migrationsFS, migrationsDir)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: open embedded migrations: %w", err)
+	}
+
+	locker, err := lock.NewPostgresSessionLocker()
+	if err != nil {
+		return nil, fmt.Errorf("migrate: create session locker: %w", err)
+	}
+
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, migrations,
+		goose.WithTableName(tableName),
+		goose.WithSessionLocker(locker),
+		goose.WithSlog(slog.Default()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: create provider: %w", err)
+	}
+
+	return provider, nil
+}
+
+func run(ctx context.Context, p *goose.Provider, command Command, logger *slog.Logger) error {
 	switch command {
 	case CommandUp:
-		runErr = goose.UpContext(ctx, sqlDB, migrationsDir)
+		results, err := p.Up(ctx)
+		if err != nil {
+			return err
+		}
+		logger.Info("migrate: applied", "count", len(results))
+		return nil
+
 	case CommandDown:
-		runErr = goose.DownContext(ctx, sqlDB, migrationsDir)
-	case CommandStatus:
-		runErr = goose.StatusContext(ctx, sqlDB, migrationsDir)
+		_, err := p.Down(ctx)
+		return err
+
 	case CommandRedo:
-		runErr = goose.RedoContext(ctx, sqlDB, migrationsDir)
-	default:
-		runErr = goose.RunContext(ctx, string(command), sqlDB, migrationsDir)
+		if _, err := p.Down(ctx); err != nil {
+			return err
+		}
+		_, err := p.UpByOne(ctx)
+		return err
+
+	case CommandStatus:
+		statuses, err := p.Status(ctx)
+		if err != nil {
+			return err
+		}
+		for _, s := range statuses {
+			logger.Info("migration", "version", s.Source.Version, "file", s.Source.Path, "state", s.State, "applied_at", s.AppliedAt)
+		}
+		return nil
+
+	case CommandVersion:
+		version, err := p.GetDBVersion(ctx)
+		if err != nil {
+			return err
+		}
+		logger.Info("migrate: current version", "version", version)
+		return nil
 	}
 
-	if runErr != nil {
-		log.Printf("migrate: command=%s failed: %v", command, runErr)
-		return runErr
-	}
-
-	log.Printf("migrate: command=%s finished successfully", command)
-	return nil
+	return fmt.Errorf("unknown command %q (want up, down, redo, status or version)", command)
 }

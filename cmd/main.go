@@ -1,10 +1,9 @@
 package main
 
 import (
-	"api-core/internal/config"
-	"api-core/internal/container"
-	"api-core/internal/migrate"
-	"log"
+	"errors"
+	"io/fs"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -17,71 +16,37 @@ const (
 	envPath = ".env"
 )
 
-var (
-	configAddressFlag = cli.StringFlag{
-		Name:     config.FlagAddress,
-		Value:    "0.0.0.0:3030",
-		Usage:    "Configuration Address",
-		Required: false,
-	}
-	configMigrateActionFlag = cli.StringFlag{
-		Name:     config.FlagMigrateAction,
-		Value:    config.FlagUpAction,
-		Usage:    "Migration action (up, down, redo, status, etc.)",
-		Required: false,
-	}
-)
+func main() {
+	setupLogger(os.Getenv("LOG_FORMAT"), os.Getenv("LOG_LEVEL"))
 
-func init() {
-	err := godotenv.Load(strings.Split(envPath, ",")...)
-	if err != nil {
-		log.Fatal("Error loading .env file")
+	// .env is optional: in containers configuration comes from the environment.
+	if err := godotenv.Load(envPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Error("load .env", "error", err)
+		os.Exit(1)
+	}
+
+	app := &cli.App{
+		Name:     appName,
+		Commands: []*cli.Command{apiCommand(), migrateCommand()},
+	}
+
+	if err := app.Run(os.Args); err != nil {
+		slog.Error("command failed", "error", err)
+		os.Exit(1)
 	}
 }
 
-func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatal(err)
-	}
-	ctn, err := container.NewContainer(cfg)
-	if err != nil {
-		log.Fatal(err)
+func setupLogger(format, level string) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		lvl = slog.LevelInfo
 	}
 
-	app := cli.NewApp()
-	app.Name = appName
-	flags := []cli.Flag{}
-	app.Metadata = map[string]any{
-		config.FlagContainer: ctn,
-	}
-	app.Commands = []*cli.Command{
-		{
-			Name:    "api",
-			Aliases: []string{},
-			Usage:   "Run the api",
-			Action:  startAPIServer,
-			Flags:   append(flags, &configAddressFlag),
-		},
-		{
-			Name:  "migrate",
-			Usage: "Run database migrations (goose)",
-			Flags: []cli.Flag{
-				&configMigrateActionFlag,
-			},
-			Action: func(c *cli.Context) error {
-				action := c.String(config.FlagMigrateAction)
-				if action == "" {
-					action = config.FlagUpAction
-				}
-				return migrate.Run(c.Context, cfg.Database, migrate.Command(action))
-			},
-		},
+	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler = slog.NewTextHandler(os.Stdout, opts)
+	if strings.EqualFold(format, "json") {
+		h = slog.NewJSONHandler(os.Stdout, opts)
 	}
 
-	err = app.Run(os.Args)
-	if err != nil {
-		log.Fatal(err)
-		os.Exit(1)
-	}
+	slog.SetDefault(slog.New(h))
 }

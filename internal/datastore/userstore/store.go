@@ -1,98 +1,91 @@
+// Package userstore persists users in Postgres.
 package userstore
 
 import (
 	"context"
 	"fmt"
-	"time"
-
-	bobmodel "api-core/internal/bob"
-	"api-core/internal/datastore"
 
 	"github.com/aarondl/opt/omit"
 	"github.com/aarondl/opt/omitnull"
 	"github.com/stephenafamo/bob"
 	"github.com/stephenafamo/bob/dialect/psql"
+	"github.com/stephenafamo/bob/dialect/psql/im"
 	"github.com/stephenafamo/bob/dialect/psql/sm"
-	"github.com/stephenafamo/bob/expr"
+
+	bobmodel "api-core/internal/bob"
+	"api-core/internal/datastore"
+	"api-core/internal/domain"
+	"api-core/pkg/errorx"
 )
 
-type Store interface {
-	GetByGoogleID(ctx context.Context, googleID string) (*User, error)
-	UpsertGoogleUser(ctx context.Context, params UpsertGoogleUserParams) (*User, error)
-}
-
-type store struct {
+// Store reads and writes users. Errors are classified with errorx
+// (e.g. a missing row becomes errorx.NotExist).
+type Store struct {
 	exec bob.Executor
 }
 
-func New(pool datastore.PGXPool) Store {
+// New returns a store backed by the connection pool.
+func New(pool datastore.PGXPool) *Store {
 	return NewWithExecutor(datastore.NewBobExecutor(pool))
 }
 
-func NewWithExecutor(exec bob.Executor) Store {
-	return &store{
-		exec: exec,
+// NewWithExecutor returns a store bound to exec, e.g. a transaction executor
+// passed to a datastore.TxFunc.
+func NewWithExecutor(exec bob.Executor) *Store {
+	return &Store{exec: exec}
+}
+
+// GetByID returns the user with the given id.
+func (s *Store) GetByID(ctx context.Context, id int64) (*domain.User, error) {
+	row, err := bobmodel.FindUser(ctx, s.exec, id)
+	if err != nil {
+		return nil, errorx.Wrap(fmt.Errorf("userstore: get by id %d: %w", id, err), errorx.Database)
 	}
+
+	return toDomain(row), nil
 }
 
-type UpsertGoogleUserParams struct {
-	GoogleID      string
-	Email         string
-	Name          *string
-	Picture       *string
-	Locale        *string
-	VerifiedEmail bool
-	LoginAt       time.Time
-}
-
-type User struct {
-	ID            int64
-	GoogleID      string
-	Email         string
-	Name          *string
-	Picture       *string
-	Locale        *string
-	VerifiedEmail bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	LastLoginAt   *time.Time
-}
-
-func (s *store) GetByGoogleID(ctx context.Context, googleID string) (*User, error) {
+// GetByGoogleID returns the user linked to the given Google account.
+func (s *Store) GetByGoogleID(ctx context.Context, googleID string) (*domain.User, error) {
 	row, err := bobmodel.Users.Query(
 		sm.Where(bobmodel.Users.Columns.GoogleID.EQ(psql.Arg(googleID))),
 	).One(ctx, s.exec)
 	if err != nil {
-		return nil, err
+		return nil, errorx.Wrap(fmt.Errorf("userstore: get by google id: %w", err), errorx.Database)
 	}
-	return convertUser(row), nil
+
+	return toDomain(row), nil
 }
 
-func (s *store) UpsertGoogleUser(ctx context.Context, params UpsertGoogleUserParams) (*User, error) {
+// UpsertGoogleUser creates the user on first sign-in and refreshes the
+// profile on subsequent sign-ins, keyed by google_id.
+func (s *Store) UpsertGoogleUser(ctx context.Context, acc domain.GoogleAccount) (*domain.User, error) {
 	setter := &bobmodel.UserSetter{
-		GoogleID:      omit.From(params.GoogleID),
-		Email:         omit.From(params.Email),
-		Name:          omitnull.FromPtr(params.Name),
-		Picture:       omitnull.FromPtr(params.Picture),
-		Locale:        omitnull.FromPtr(params.Locale),
-		VerifiedEmail: omitnull.From(params.VerifiedEmail),
-		LastLoginAt:   omitnull.From(params.LoginAt),
+		GoogleID:      omit.From(acc.GoogleID),
+		Email:         omit.From(acc.Email),
+		Name:          omitnull.FromPtr(acc.Name),
+		Picture:       omitnull.FromPtr(acc.Picture),
+		Locale:        omitnull.FromPtr(acc.Locale),
+		VerifiedEmail: omitnull.From(acc.VerifiedEmail),
+		UpdatedAt:     omit.From(acc.LoginAt),
+		LastLoginAt:   omitnull.From(acc.LoginAt),
 	}
 
-	if cols := setter.SetColumns(); len(cols) == 0 {
-		return nil, fmt.Errorf("userstore: empty column set for google user %s", params.GoogleID)
-	}
-
-	row, err := bobmodel.Users.Insert(setter).One(ctx, s.exec)
+	row, err := bobmodel.Users.Insert(
+		setter,
+		im.OnConflict(psql.Quote("google_id")).DoUpdate(
+			im.SetExcluded("email", "name", "picture", "locale", "verified_email", "updated_at", "last_login_at"),
+		),
+	).One(ctx, s.exec)
 	if err != nil {
-		return nil, err
+		return nil, errorx.Wrap(fmt.Errorf("userstore: upsert google user: %w", err), errorx.Database)
 	}
 
-	return convertUser(row), nil
+	return toDomain(row), nil
 }
 
-func convertUser(model *bobmodel.User) *User {
-	return &User{
+func toDomain(model *bobmodel.User) *domain.User {
+	return &domain.User{
 		ID:            model.ID,
 		GoogleID:      model.GoogleID,
 		Email:         model.Email,
@@ -103,12 +96,5 @@ func convertUser(model *bobmodel.User) *User {
 		CreatedAt:     model.CreatedAt,
 		UpdatedAt:     model.UpdatedAt,
 		LastLoginAt:   model.LastLoginAt.Ptr(),
-	}
-}
-
-func assign(column bob.Expression, value bob.Expression) bob.Expression {
-	return expr.Join{
-		Sep:   " = ",
-		Exprs: []bob.Expression{column, value},
 	}
 }

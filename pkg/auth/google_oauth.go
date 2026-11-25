@@ -6,10 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+const (
+	googleUserInfoEndpoint = "https://www.googleapis.com/oauth2/v2/userinfo"
+	defaultHTTPTimeout     = 10 * time.Second
+)
+
+// DefaultGoogleScopes defines the minimal profile information we request.
+var DefaultGoogleScopes = []string{
+	"https://www.googleapis.com/auth/userinfo.email",
+	"https://www.googleapis.com/auth/userinfo.profile",
+}
 
 // GoogleOAuthConfig groups the required OAuth2 configuration.
 type GoogleOAuthConfig struct {
@@ -20,16 +32,22 @@ type GoogleOAuthConfig struct {
 	HTTPClient   *http.Client
 }
 
-// GoogleOAuth wraps oauth2.Config to simplify Google sign-in/retrieval.
+// GoogleOAuth wraps oauth2.Config to simplify Google sign-in.
 type GoogleOAuth struct {
 	oauthConfig *oauth2.Config
 	httpClient  *http.Client
 }
 
-// DefaultGoogleScopes defines the minimal profile information we request.
-var DefaultGoogleScopes = []string{
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
+// GoogleUserInfo is the payload returned by Google's userinfo endpoint.
+type GoogleUserInfo struct {
+	ID            string `json:"id"`
+	Email         string `json:"email"`
+	VerifiedEmail bool   `json:"verified_email"`
+	Name          string `json:"name"`
+	GivenName     string `json:"given_name"`
+	FamilyName    string `json:"family_name"`
+	Picture       string `json:"picture"`
+	Locale        string `json:"locale"`
 }
 
 // NewGoogleOAuth validates the configuration and returns a ready-to-use helper.
@@ -43,23 +61,26 @@ func NewGoogleOAuth(cfg GoogleOAuthConfig) (*GoogleOAuth, error) {
 		scopes = DefaultGoogleScopes
 	}
 
-	config := &oauth2.Config{
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  cfg.RedirectURL,
-		Scopes:       scopes,
-		Endpoint:     google.Endpoint,
-	}
-
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 
 	return &GoogleOAuth{
-		oauthConfig: config,
-		httpClient:  httpClient,
+		oauthConfig: &oauth2.Config{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			RedirectURL:  cfg.RedirectURL,
+			Scopes:       scopes,
+			Endpoint:     google.Endpoint,
+		},
+		httpClient: httpClient,
 	}, nil
+}
+
+// withHTTPClient makes the oauth2 package use our client (and its timeout).
+func (g *GoogleOAuth) withHTTPClient(ctx context.Context) context.Context {
+	return context.WithValue(ctx, oauth2.HTTPClient, g.httpClient)
 }
 
 // AuthCodeURL builds the Google authorization URL.
@@ -69,34 +90,13 @@ func (g *GoogleOAuth) AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) s
 
 // Exchange swaps the authorization code for access+refresh tokens.
 func (g *GoogleOAuth) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
-	token, err := g.oauthConfig.Exchange(ctx, code)
+	token, err := g.oauthConfig.Exchange(g.withHTTPClient(ctx), code)
 	if err != nil {
 		return nil, fmt.Errorf("google oauth exchange: %w", err)
 	}
+
 	return token, nil
 }
-
-// Client returns an HTTP client that automatically injects the OAuth token.
-func (g *GoogleOAuth) Client(ctx context.Context, token *oauth2.Token) *http.Client {
-	if g.httpClient != nil && token == nil {
-		return g.httpClient
-	}
-	return g.oauthConfig.Client(ctx, token)
-}
-
-// GoogleUserInfo is the payload returned by Google userinfo endpoint.
-type GoogleUserInfo struct {
-	ID            string `json:"id"`
-	Email         string `json:"email"`
-	VerifiedEmail bool   `json:"verified_email"`
-	Name          string `json:"name"`
-	GivenName     string `json:"given_name"`
-	FamilyName    string `json:"family_name"`
-	Picture       string `json:"picture"`
-	Locale        string `json:"locale"`
-}
-
-const googleUserInfoEndpoint = "https://www.googleapis.com/oauth2/v2/userinfo"
 
 // FetchUserInfo calls Google's userinfo endpoint.
 func (g *GoogleOAuth) FetchUserInfo(ctx context.Context, token *oauth2.Token) (*GoogleUserInfo, error) {
@@ -104,14 +104,22 @@ func (g *GoogleOAuth) FetchUserInfo(ctx context.Context, token *oauth2.Token) (*
 		return nil, errors.New("google oauth: nil token")
 	}
 
-	client := g.oauthConfig.Client(ctx, token)
-	resp, err := client.Get(googleUserInfoEndpoint)
+	// oauth2's client drops http.Client.Timeout, so bound the call explicitly.
+	ctx, cancel := context.WithTimeout(ctx, defaultHTTPTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, googleUserInfoEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("google oauth userinfo request: %w", err)
+	}
+
+	resp, err := g.oauthConfig.Client(g.withHTTPClient(ctx), token).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("google oauth userinfo request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("google oauth userinfo failed: status=%d", resp.StatusCode)
 	}
 
@@ -129,8 +137,7 @@ func (g *GoogleOAuth) RefreshToken(ctx context.Context, token *oauth2.Token) (*o
 		return nil, errors.New("google oauth: no refresh token")
 	}
 
-	ts := g.oauthConfig.TokenSource(ctx, token)
-	newToken, err := ts.Token()
+	newToken, err := g.oauthConfig.TokenSource(g.withHTTPClient(ctx), token).Token()
 	if err != nil {
 		return nil, fmt.Errorf("google oauth refresh token: %w", err)
 	}

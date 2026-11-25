@@ -1,109 +1,124 @@
 package httpx
 
 import (
-	"api-core/pkg/auth"
-	"api-core/pkg/errorx"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
-
 	"github.com/labstack/echo/v4"
+
+	"api-core/pkg/auth"
+	"api-core/pkg/errorx"
 )
 
-type body struct {
+// Body is the envelope of every JSON response.
+type Body struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
 	Data    any    `json:"data,omitempty"`
 }
 
-func Abort(c echo.Context, v any, codes ...int) error {
-	code := -1
-	if len(codes) >= 1 {
-		code = codes[0]
-	}
-
-	err, ok := v.(error)
-	if ok {
-		return abortErrorWithStatusJSON(c, err, code)
-	}
-
-	if code == -1 {
-		code = 200
-	}
-	return c.JSON(code, &body{Data: v})
+// Success writes data with 200 OK.
+func Success(c echo.Context, data any) error {
+	return c.JSON(http.StatusOK, &Body{Data: data})
 }
 
-func abortErrorWithStatusJSON(c echo.Context, err error, code int) error {
+// Fail writes err as an error response. The status and code come from the
+// errorx kind; errors without a kind are treated as internal failures.
+// Server-side failures are logged and their details are never sent to clients.
+func Fail(c echo.Context, err error) error {
+	err = normalize(err)
+
 	var target *errorx.Error
-
-	message := errorx.MaskErrorMessage(err)
-
 	if !errors.As(err, &target) {
-		c.Logger().Error(err)
-		if code == -1 {
-			code = http.StatusInternalServerError
-		}
-		return c.JSON(code, &body{Code: "error", Message: message})
+		// unreachable: normalize always returns *errorx.Error
+		return c.JSON(http.StatusInternalServerError, &Body{Code: "error", Message: errorx.MaskErrorMessage(err)})
 	}
 
-	if code == -1 {
-		code = target.Status()
+	status := target.Status()
+	if status >= http.StatusInternalServerError {
+		req := c.Request()
+		slog.ErrorContext(req.Context(), "request failed",
+			"method", req.Method,
+			"path", req.URL.Path,
+			"status", status,
+			"error", err,
+		)
 	}
 
-	if target.Of(errorx.Database) || target.Of(errorx.Service) {
-		c.Logger().Error(err)
-		return c.JSON(code, &body{Code: target.Code(), Message: message})
-	}
-
-	return c.JSON(code, &body{Code: target.Code(), Message: message})
+	return c.JSON(status, &Body{Code: target.Code(), Message: errorx.MaskErrorMessage(err)})
 }
 
-type ValidatorStruct interface {
+// RestAbort writes v on success, or err as an error response.
+func RestAbort(c echo.Context, v any, err error) error {
+	if err != nil {
+		return Fail(c, err)
+	}
+
+	return Success(c, v)
+}
+
+// normalize gives every error a kind.
+func normalize(err error) error {
+	if errors.Is(err, auth.ErrInvalidSession) {
+		return errorx.WrapMsg(err, errorx.Authn, "authentication required")
+	}
+
+	return errorx.Wrap(err, errorx.Service)
+}
+
+// StructValidator validates structs; *validator.Validate satisfies it.
+type StructValidator interface {
 	Struct(s any) error
 }
 
-func ValidateStruct(c echo.Context, v ValidatorStruct, s any) error {
+// ValidateStruct validates s and returns a Validation error naming the
+// offending fields.
+func ValidateStruct(v StructValidator, s any) error {
 	err := v.Struct(s)
 	if err == nil {
 		return nil
 	}
 
-	validationErrors, ok := err.(validator.ValidationErrors)
-	if !ok {
-		return err
+	var validationErrors validator.ValidationErrors
+	if !errors.As(err, &validationErrors) {
+		return errorx.Wrap(err, errorx.Invalid)
 	}
 
-	fields := []string{}
+	fields := make([]string, 0, len(validationErrors))
 	for _, f := range validationErrors {
-		fields = append(fields, f.StructField())
+		fields = append(fields, f.Field())
 	}
 
-	return fmt.Errorf("invalid %s", strings.Join(fields, ", "))
+	return errorx.WrapMsg(err, errorx.Validation, fmt.Sprintf("invalid %s", strings.Join(fields, ", ")))
 }
 
-// RestAbort handles HTTP response with proper error handling.
-// It returns a success response if err is nil, otherwise it wraps and returns the error.
-// The function prioritizes specific error types (auth errors, errorx.Error) before generic errors.
-func RestAbort(c echo.Context, v any, err error) error {
-	// Success case: no error, return data
-	if err == nil {
-		return Abort(c, v)
+// ErrorHandler is an echo.HTTPErrorHandler that renders framework errors
+// (404, 405, body limit, ...) with the same envelope as application errors.
+func ErrorHandler(err error, c echo.Context) {
+	if c.Response().Committed {
+		return
 	}
 
-	// Handle specific authentication errors
-	if errors.Is(err, auth.ErrInvalidSession) {
-		return Abort(c, errorx.Wrap(err, errorx.Authn))
+	var he *echo.HTTPError
+	if !errors.As(err, &he) {
+		_ = Fail(c, err)
+		return
 	}
 
-	// Handle already wrapped errorx.Error (preserve the error kind)
-	var targetErr *errorx.Error
-	if errors.As(err, &targetErr) {
-		return Abort(c, err)
+	code := strings.ToLower(strings.ReplaceAll(http.StatusText(he.Code), " ", "-"))
+	message := http.StatusText(he.Code)
+	if msg, ok := he.Message.(string); ok && he.Code < http.StatusInternalServerError {
+		message = msg
 	}
 
-	// Generic error: wrap as Service error
-	return Abort(c, errorx.Wrap(err, errorx.Service))
+	if c.Request().Method == http.MethodHead {
+		_ = c.NoContent(he.Code)
+		return
+	}
+
+	_ = c.JSON(he.Code, &Body{Code: code, Message: message})
 }

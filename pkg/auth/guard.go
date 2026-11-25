@@ -2,7 +2,7 @@ package auth
 
 import (
 	"errors"
-	"github.com/golang-jwt/jwt/v4"
+
 	"github.com/ory/ladon"
 )
 
@@ -13,38 +13,32 @@ const (
 	ReadAuthzAction   AuthzAction = "read"
 )
 
-type Guard struct {
-	authn AuthnChecker
-	authz AuthzChecker
-}
-
+// AuthzChecker decides whether an access request is allowed.
+// *ladon.Ladon satisfies it.
 type AuthzChecker interface {
 	IsAllowed(r *ladon.Request) error
 }
 
-type AuthnChecker interface {
-	AuthenticateJWT(tokenStr string) (*jwt.Token, error)
+// Guard performs authorization checks. Authentication is the job of the
+// token verifier used by the HTTP middleware.
+type Guard struct {
+	authz AuthzChecker
 }
 
-func NewGuard(authn AuthnChecker, authz AuthzChecker) (*Guard, error) {
-	if authn == nil || authz == nil {
-		return nil, errors.New("invalid authn or authz")
+func NewGuard(authz AuthzChecker) (*Guard, error) {
+	if authz == nil {
+		return nil, errors.New("auth: nil authz checker")
 	}
 
-	return &Guard{authn, authz}, nil
+	return &Guard{authz: authz}, nil
 }
 
-func (guard *Guard) Allow(sub string, resource string, action AuthzAction, ctx map[string]any) error {
-	r := &ladon.Request{
+// Allow returns nil when sub may perform action on resource.
+func (g *Guard) Allow(sub, resource string, action AuthzAction, ctx map[string]any) error {
+	return g.authz.IsAllowed(&ladon.Request{
 		Subject:  sub,
 		Resource: resource,
 		Action:   string(action),
 		Context:  ctx,
-	}
-
-	return guard.authz.IsAllowed(r)
-}
-
-func (g Guard) AuthenticateJWT(tokenStr string) (*jwt.Token, error) {
-	return g.authn.AuthenticateJWT(tokenStr)
+	})
 }

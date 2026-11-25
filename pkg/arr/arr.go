@@ -17,8 +17,7 @@ func ArrEach[T any](vals []T, cb func(T)) {
 
 func ArrEachWithErr[T any](vals []T, cb func(T) error) error {
 	for _, v := range vals {
-		err := cb(v)
-		if err != nil {
+		if err := cb(v); err != nil {
 			return err
 		}
 	}
@@ -26,33 +25,26 @@ func ArrEachWithErr[T any](vals []T, cb func(T) error) error {
 	return nil
 }
 
-func ArrEachIdx[T any](vals []T, cb func([]T) []T) {
-	cb(vals)
-}
-
+// ArrUnique returns vals without duplicates, keeping the first occurrence order.
 func ArrUnique[T comparable](vals []T) []T {
-	valsUnique := []T{}
-	valsMap := map[T]bool{}
+	valsUnique := make([]T, 0, len(vals))
+	seen := make(map[T]struct{}, len(vals))
 	for _, val := range vals {
-		if valsMap[val] {
+		if _, ok := seen[val]; ok {
 			continue
 		}
 
 		valsUnique = append(valsUnique, val)
-		valsMap[val] = true
+		seen[val] = struct{}{}
 	}
 
 	return valsUnique
 }
 
-func ArrPrepend[T comparable](vals []T, v T) []T {
-	if len(vals) == 0 {
-		return vals
-	}
-
-	var noop T
-	vals = append(vals, noop)
-	copy(vals[1:], vals)
-	vals[0] = v
-	return vals
+// ArrPrepend returns a new slice with v followed by vals. The input slice is
+// never modified.
+func ArrPrepend[T any](vals []T, v T) []T {
+	result := make([]T, 0, len(vals)+1)
+	result = append(result, v)
+	return append(result, vals...)
 }

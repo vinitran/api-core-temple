@@ -3,67 +3,90 @@ package db
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
+	"math"
 	"runtime"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/redis/go-redis/v9"
 )
 
-// NewSQLDB creates a new SQL DB
-func NewSQLDB(cfg DatabaseConfig) (*pgxpool.Pool, error) {
-	dsn := cfg.DSN()
-	dsnSafe := fmt.Sprintf("postgres://%s:****@%s:%s/%s?sslmode=disable", cfg.User, cfg.Host, cfg.Port, cfg.Name)
+const connectTimeout = 10 * time.Second
 
-	log.Printf("postgres: initializing pool for %s", dsnSafe)
-
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		log.Printf("postgres: failed to parse DSN %s: %v", dsnSafe, err)
-		return nil, err
-	}
-
-	max := runtime.NumCPU() * 4
-	if cfg.MaxConns > 0 {
-		max = cfg.MaxConns
-	}
-	config.MaxConns = int32(max)
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		log.Printf("postgres: failed to create pool for %s: %v", dsnSafe, err)
-		return nil, err
-	}
-
-	err = pool.Ping(context.Background())
-	if err != nil {
-		log.Printf("postgres: ping failed for %s: %v", dsnSafe, err)
-		return nil, err
-	}
-
-	log.Printf("postgres: connected successfully to %s", dsnSafe)
-	return pool, err
+// Postgres is a pgx pool that the DI container can shut down
+// (it implements do.Shutdownable).
+type Postgres struct {
+	*pgxpool.Pool
 }
 
-// NewRedis creates a new REDIS DB
-func NewRedis(cfg RedisConfig) (*redis.Client, error) {
-	redisAddr := fmt.Sprintf("%s:%s", cfg.Host, cfg.Port)
+// Shutdown closes the pool.
+func (p *Postgres) Shutdown() error {
+	p.Close()
+	slog.Info("postgres: pool closed")
+	return nil
+}
 
-	log.Printf("redis: initializing client for %s", redisAddr)
+// Redis is a redis client that the DI container can shut down
+// (it implements do.Shutdownable).
+type Redis struct {
+	*redis.Client
+}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: cfg.Password,
-		DB:       0,
-	})
+// Shutdown closes the client.
+func (r *Redis) Shutdown() error {
+	slog.Info("redis: client closing")
+	return r.Close()
+}
 
-	err := rdb.Ping(context.Background()).Err()
+// NewPostgres creates a connection pool and verifies connectivity.
+func NewPostgres(ctx context.Context, cfg DatabaseConfig) (*Postgres, error) {
+	dsnSafe := cfg.RedactedDSN()
+
+	poolCfg, err := pgxpool.ParseConfig(cfg.DSN())
 	if err != nil {
-		log.Printf("redis: ping failed for %s: %v", redisAddr, err)
-		return nil, err
+		return nil, fmt.Errorf("postgres: parse dsn %s: %w", dsnSafe, err)
 	}
 
-	log.Printf("redis: connected successfully to %s", redisAddr)
-	return rdb, nil
+	maxConns := runtime.NumCPU() * 4
+	if cfg.MaxConns > 0 {
+		maxConns = cfg.MaxConns
+	}
+	poolCfg.MaxConns = int32(min(maxConns, math.MaxInt32))
+
+	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: create pool for %s: %w", dsnSafe, err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("postgres: ping %s: %w", dsnSafe, err)
+	}
+
+	slog.Info("postgres: connected", "dsn", dsnSafe, "max_conns", poolCfg.MaxConns)
+	return &Postgres{Pool: pool}, nil
+}
+
+// NewRedis creates a Redis client and verifies connectivity.
+func NewRedis(ctx context.Context, cfg RedisConfig) (*Redis, error) {
+	client := redis.NewClient(&redis.Options{
+		Addr:     cfg.Addr(),
+		Password: cfg.Password,
+		DB:       cfg.DB,
+	})
+
+	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("redis: ping %s: %w", cfg, err)
+	}
+
+	slog.Info("redis: connected", "addr", cfg.String())
+	return &Redis{Client: client}, nil
 }
